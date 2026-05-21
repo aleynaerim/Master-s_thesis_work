@@ -187,56 +187,55 @@ print(plotToPdf)
 dev.off()
 
 
-#Counts per mapped cell type
-tab_counts <- table(query$org_unmapped_bucket)
+#Stacked bar plot for cell type percentages in twoPass annotation
 
-#Percentages
-tab_percent <- round(tab_counts / sum(tab_counts) * 100, 1)
+library(RColorBrewer)
 
-tab_counts
-tab_percent
-
-
-#Counts of the cells in the clusters
-tt_counts <- table(query$final)
-
-#Percentages of the cells in the clusters
-tt_percent <- round(tt_counts / sum(tt_counts) * 100, 2)
-
-tt_counts
-tt_percent
-
-library(ggplot2)
-
-#Percentage of cell types in twoPass
-library(ggplot2)
-
-#Convert table to data frame
-tt_percent_df <- data.frame(
-  cell_type = names(tt_percent),
-  percentage = as.numeric(tt_percent),
-  stringsAsFactors = FALSE
+#Combine multiple qualitative palettes
+colors_combined <- c(
+  brewer.pal(8, "Set1"),
+  brewer.pal(8, "Set2"),
+  brewer.pal(11, "Set3")
 )
 
-custom_colors <- c("#E57373","#FF9800","#FDD835","#C0CA33","#8BC34A","#4CAF50",
-                   "#26A69A","#26C6DA","#00BCD4","#29B6F6","#42A5F5","#7986CB",
-                   "#AB47BC","#EC407A","#F06292","#F48FB1")
+col_vector <- setNames(colors_combined[1:27], 
+                       c('PgS', 'PgG2M', 'vRG', 'oRG', 'panRG-O', 'glycoRG-O', 
+                         'IP', 'IPC-Mature-O', 'ExDp-O', 'ExDp1', 'ExDp2', 
+                         'ExNeuNew-O', 'ExN', 'ExM', 'ExM-U', 'ExU-O', 
+                         'ExPanNeu-O', 'InhN-O', 'InCGE', 'InMGE', 'OPC', 
+                         'Astro-O', 'hRG-O', 'AstroHindb-O', 'Per', 'End', 'Unmapped'))
 
-#Create the bar plot
-#Create the plot and assign it to a variable
-p <- ggplot(tt_percent_df, aes(x = cell_type, y = percentage, fill = cell_type)) +
-  geom_bar(stat = "identity", width = 0.6) +
-  scale_fill_manual(values = custom_colors) +
-  labs(x = "Cell Type", 
-       y = "Percentage of Cells (%)",
-       title = "Cell Type Distribution") +
-  theme_classic() +
-  theme(axis.text.x = element_text(angle = 45, hjust = 1, size = 20),
-        axis.text.y = element_text(size = 20),
-        axis.title = element_text(size = 20, face = "bold"),
-        legend.position = "none",
-        plot.title = element_text(size = 25, face = "bold", hjust = 10))
+query$final <- ifelse(query$final %in% c("Unk-O","LQ-RG-O"), "Unmapped", query$final)
+tt <- table(query$donor,query$final)
+tt <- as.data.frame(round(tt*100/rowSums(tt),2))
+colnames(tt) <- c("Sample","CellType","Percentage")
+tt <- as.data.frame(tt)
+detected_celltypes <- unique(tt$CellType)
+n_celltypes <- length(detected_celltypes)
 
-pdf(file=paste0(resultsDir, "Cell type percentage in twoPass.pdf"), width=16, height=8)
-print(p)
+cols <- col_vector[names(col_vector) %in% tt$CellType]
+order <- names(cols)
+tt$CellType <- factor(tt$CellType, levels = order)
+
+
+p1 <- ggplot(tt, aes(fill=CellType, x=Sample, y=Percentage))+
+  geom_bar(position="fill", stat="identity") +
+  ggtitle("Comparison of cell type proportions (twoPass)")+
+  theme_bw()+
+  theme(plot.title=element_text(size=25, face="bold"),
+        plot.subtitle=element_text(size=15, face="bold"),
+        axis.text.x=element_text(size=15,angle=90,hjust=1, vjust=0.5),
+        axis.text.y=element_text(size=15),      
+        axis.title.y=element_text(size=18, face="bold"),
+        legend.title = element_text(size = 20, face="bold", hjust=0.5), 
+        legend.text  = element_text(size = 20),
+        legend.key.size = unit(0.5, "lines"))+
+        guides(shape = guide_legend(override.aes = list(size = 1)),
+        fill = guide_legend(override.aes = list(size = 1), ncol=1))+
+        scale_y_continuous(labels = scales::percent)+
+        xlab("")+
+        ylab("Percentage of cells")
+
+pdf(file=paste0(resultsDir,"stackedPlot_perSample_twoPass.pdf"), width=16, height = 8)
+p1
 dev.off()
