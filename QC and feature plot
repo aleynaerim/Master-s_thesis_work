@@ -1,0 +1,98 @@
+.libPaths(c("/x", .libPaths()))
+libpath <- .libPaths()[1]
+options(repos = c(CRAN = "https://packagemanager.posit.co/cran/2022-06-29"))
+options(BioC_mirror = "https://packagemanager.posit.co/bioconductor")
+library(Seurat)
+library(Seurat)
+library(readxl)
+library(ggplot2)
+library(plyr)
+library(dplyr)
+library(harmony)
+library(ggpubr)
+library(patchwork)
+library(gghighlight)
+library(RColorBrewer)
+library(scales)
+
+
+resultsDir <- "/x/"
+query <- readRDS("/x/NPC_pool.RDS")
+query$patientLine <- ifelse(query$patientDisease=='Intellectual disability', T, F)
+
+#Dimensionality reduction
+query <- NormalizeData(query)
+query <- FindVariableFeatures(query)
+top10 <- head(VariableFeatures(query), 10)
+p1 <- VariableFeaturePlot(query)
+LabelPoints(plot = p1, points = top10, repel = TRUE, xnudge=0, ynudge=0)
+
+query <- ScaleData(query)
+query <- RunPCA(query)
+
+ElbowPlot(query, reduction="pca") #use n=15
+
+#Checking cell cycle scores
+s.genes <- cc.genes$s.genes
+g2m.genes <- cc.genes$g2m.genes
+query <- CellCycleScoring(query, s.features = s.genes, g2m.features = g2m.genes, set.ident = F)
+query$CC.Difference <- query$S.Score - query$G2M.Score
+
+DimPlot(query, reduction="pca", group.by="Phase") + facet_wrap(~Phase) 
+ggsave(paste0(resultsDir,"DimPLot_PCA_CellCycle.png"),width=6,height=4,bg="white")
+
+#Dimentionality reduction
+query <- query %>%
+  FindNeighbors(reduction = "pca", dims = 1:15) %>%
+  FindClusters(resolution = 0.8) 
+  RunUMAP(reduction = "pca", dims = 1:15, 
+  reduction.name = "umap.pca") %>%
+  identity()
+
+  plotToPdf <- DimPlot(query, reduction = "umap.pca", label = TRUE, pt.size = .1, group.by="donor")+theme_gray()+
+  theme(plot.title=element_text(hjust=0.5, size=13, face="bold"))+
+  ggtitle("10x libraries - PCA (n=15)")+theme_bw()
+  pdf(file=paste0(resultsDir,"UMAP_notHarmonised_per_donor.pdf"))
+  plot(plotToPdf)
+  dev.off()
+
+  #Testing harmony batch correction
+  set.seed(123)
+  # options(repr.plot.height = 2.5, repr.plot.width = 6)
+  query <- query %>%
+  RunHarmony(c("donor"), plot_convergence = TRUE)
+  harmony_embeddings <- Embeddings(query, 'harmony')
+  harmony_embeddings[1:5, 1:5]
+  ElbowPlot(query, reduction="harmony")
+
+query <- query %>%
+  FindNeighbors(reduction = "harmony", dims = 1:15) %>% 
+  FindClusters(resolution = 0.8) %>%
+  RunUMAP(reduction = "harmony", dims = 1:15, reduction.name = "umap.harmony") %>% 
+  identity()
+
+  plotToPdf <- DimPlot(query, reduction = "umap.harmony", label = TRUE, pt.size = .1, group.by="donor", repel = T)+theme_gray()+
+  theme(plot.title=element_text(hjust=0.5, size=13, face="bold"))+
+  ggtitle("10x libraries - Harmony (n=15)")+theme_bw()
+  pdf(file=paste0(resultsDir,"UMAP_Harmonised_per_donor.pdf"))
+  plot(plotToPdf)
+  dev.off()
+
+#UMAP of marker genes
+DimPlot(query, reduction = "umap.pca", label = TRUE, label.size = 5) +
+  ggtitle("Key marker genes")
+
+plotToPdf <- FeaturePlot(
+  query,
+  reduction = "umap.pca",      
+  features = c("PAX6", "FOXG1", "EMX2", "MKI67", "TUBB3",  "TBR1", "SATB2", "PDGFRB", "PAX3"),
+  ncol = 3,
+  order = TRUE,
+  min.cutoff = "q10",
+  max.cutoff = "q90")
+
+plotToPdf <- plotToPdf & 
+  labs(x = "UMAP_1", y = "UMAP_2")
+  pdf(file = paste0(resultsDir, "Exp_canonical_marker_genes.pdf"), width = 12, height = 10)
+  print(plotToPdf)   # ← print() is safer than plot() for ggplot objects
+  dev.off()
