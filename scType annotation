@@ -143,3 +143,49 @@ draw(lgd)
 popViewport()
 
 dev.off()
+
+#Stacked bar plot for the cell type percentages in scType annotation
+library(RColorBrewer)
+
+#Create the table
+tt <- table(query$donor, query$customclassif)
+tt <- as.data.frame(round(tt*100/rowSums(tt), 2))
+colnames(tt) <- c("Sample", "CellType", "Percentage")
+tt <- as.data.frame(tt)
+
+#Generate colors 
+detected_celltypes <- unique(tt$CellType)
+n_celltypes <- length(detected_celltypes)
+
+if(n_celltypes <= 12) {
+  cols <- setNames(brewer.pal(n_celltypes, "Set2"), detected_celltypes)
+} else {
+  #For more than 12 colors
+  getPalette <- colorRampPalette(brewer.pal(12, "Set2"))
+  cols <- setNames(getPalette(n_celltypes), detected_celltypes)
+}
+
+tt$CellType <- factor(tt$CellType, levels = names(cols))
+
+#Plot
+p2 <- ggplot(tt, aes(fill=CellType, x=Sample, y=Percentage))+
+  geom_bar(position="fill", stat="identity")+
+  ggtitle("Comparison of cell type proportions (scType)")+
+  theme_bw()+
+  theme(plot.title=element_text(size=25, face="bold"),
+        plot.subtitle=element_text(size=15, face="bold"),
+        axis.text.x=element_text(size=15,angle=90,hjust=1, vjust=0.5),
+        axis.text.y=element_text(size=15),           # Y-axis percentage numbers
+        axis.title.y=element_text(size=18, face="bold"),
+        legend.title = element_text(size = 20, face="bold", hjust=0.5), 
+        legend.text  = element_text(size = 20),
+        legend.key.size = unit(0.5, "lines"))+
+  guides(shape = guide_legend(override.aes = list(size = 1)),
+         fill = guide_legend(override.aes = list(size = 1), ncol=1))+
+  scale_y_continuous(labels = scales::percent)+
+  xlab("")+
+  ylab("Percentage of cells")
+
+  pdf(file=paste0(resultsDir, "stackedPlot_perSample_scType.pdf"), width=16, height=8)
+  print(p2)
+  dev.off()
