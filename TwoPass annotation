@@ -239,3 +239,70 @@ p1 <- ggplot(tt, aes(fill=CellType, x=Sample, y=Percentage))+
 pdf(file=paste0(resultsDir,"stackedPlot_perSample_twoPass.pdf"), width=16, height = 8)
 p1
 dev.off()
+
+#Market gene expression in the annotated cell types
+marker_genes <- c(
+  "PAX6", "SOX2", "NES", "HES1", "FOXG1", "LHX2", "EMX2",
+  "MKI67", "PCNA",
+  "TUBB3", "TBR1","NEUROG2", "BCL11B", "SATB2", 
+  "DLX6",
+  "PDGFRB", "PAX3"
+)
+
+#Check which genes are actually present in the object
+present <- marker_genes[marker_genes %in% rownames(seurat_obj)]
+missing <- setdiff(marker_genes, present)
+if (length(missing) > 0)
+  cat("Genes not found in object (will be skipped):", paste(missing, collapse = ", "), "\n")
+
+#Dot plot
+p_dot <- DotPlot(
+  seurat_obj,
+  features  = present,
+  group.by  = "final",
+  scale     = TRUE,
+  col.min   = -1,
+  col.max   =  1,
+  dot.scale = 20
+) +
+  scale_colour_gradientn(
+    colours = c("#00A651", "#72C057", "#C5E8A0",
+                "white",
+                "#F48BC1", "#E8297A", "#6A1F8A"),
+    limits  = c(-2, 2),
+    name    = "Average\nscaled expression"
+  ) +
+  guides(
+    colour = guide_colourbar(order = 1),   # average expression shown first
+    size   = guide_legend(order = 2)       # percent expressed shown second
+  ) +
+  labs(
+    title    = NULL,
+    subtitle = NULL,
+    x        = NULL,
+    y        = NULL,
+    size     = "Percent expressed"
+  ) +
+  theme_classic(base_size = 11) +
+  theme(
+    plot.title       = element_text(face = "bold", size = 30),
+    plot.subtitle    = element_text(size = 25, colour = "grey50"),
+    axis.text.x = element_text(size = 35, face = "italic", angle = 45, hjust = 1),
+    axis.text.y      = element_text(size = 35),
+    legend.position  = "right",
+    legend.title = element_text(size = 25, margin = margin(b = 15)),
+    legend.text      = element_text(size = 20),
+    legend.key.size  = unit(1.5, "cm"),
+    panel.grid.major = element_line(colour = "grey92", linewidth = 0.8)
+  )
+
+n_celltypes <- length(unique(seurat_obj$final))
+
+ggsave(
+  file.path(resultsDir, "Dotplot_marker_genes.pdf"),
+  plot   = p_dot,
+  width  = length(present) * 1 + 15,
+  height = n_celltypes     * 0.5 + 5
+)
+
+
