@@ -1,0 +1,145 @@
+## scType annotations
+install.packages("HGNChelper")
+library("HGNChelper")
+source("https://raw.githubusercontent.com/IanevskiAleksandr/sc-type/master/R/gene_sets_prepare.R")
+source("https://raw.githubusercontent.com/IanevskiAleksandr/sc-type/master/R/sctype_score_.R")
+gs_list = gene_sets_prepare("/x", "Brain")
+
+#gs_list$gs_positive$`Intermediate progenitor cells` <- c("EOMES", "TOP2A", "NHLH1")
+#GetAssayData(object = subset(query, final=="oRG" & donor==i), layer = "counts")
+es.max = sctype_score(scRNAseqData = as.matrix(query[["RNA"]]$scale.data), scaled = TRUE, gs = gs_list$gs_positive, gs2 = gs_list$gs_negative)
+#merge by cluster
+cL_resutls = do.call("rbind", lapply(unique(query$seurat_clusters), function(cl){
+  es.max.cl = sort(rowSums(es.max[ ,rownames(query@meta.data[query$seurat_clusters==cl, ])]), decreasing = !0)
+  head(data.frame(cluster = cl, type = names(es.max.cl), scores = es.max.cl, ncells = sum(query$seurat_clusters==cl)), 10)
+}))
+sctype_scores = cL_resutls %>% group_by(cluster) %>% top_n(n = 1, wt = scores)
+# set low-confident (low ScType score) clusters to "unknown"
+sctype_scores$type[as.numeric(as.character(sctype_scores$scores)) < sctype_scores$ncells/4] = "Unknown"
+print(sctype_scores[,1:3])
+
+
+query$customclassif = ""
+for(j in unique(sctype_scores$cluster)){
+  cl_type = sctype_scores[sctype_scores$cluster==j,]; 
+  query$customclassif[query$seurat_clusters == j] = as.character(cl_type$type[1])
+}
+
+saveRDS(query, paste0(resultsDir,"NPCpool_scType.RDS"))
+
+plotToPdf <- DimPlot(query, 
+                     reduction = "umap.pca",   
+                     group.by = "final",       
+                     label = TRUE,             
+                     repel = TRUE,
+                     pt.size = 0.3) +          
+  theme_classic() +
+  ggtitle("TwoPass Cluster Annotations")
+
+#Save to PDF
+plotToPdf <- DimPlot(query, 
+                     reduction  = "umap.pca",
+                     group.by   = "customclassif",
+                     label      = TRUE,
+                     label.size = 5,
+                     repel      = TRUE,
+                     pt.size    = 0.3) +
+  theme_classic() +
+  ggtitle("Annotation via scType") +
+  labs(
+    x     = "UMAP 1",
+    y     = "UMAP 2",
+    color = "Cell type"
+  ) +
+  theme(
+    plot.title   = element_text(size = 20),
+    axis.title   = element_text(size = 15),
+    axis.text    = element_text(size = 10),
+    legend.text  = element_text(size = 15),
+    legend.title = element_text(size = 20)
+  )
+
+pdf(file   = paste0(resultsDir, "UMAP_scType.pdf"),
+    width  = 12,
+    height = 8)
+print(plotToPdf)
+dev.off()
+  
+
+#Heatmap comparison of twoPass and scType
+
+library(ComplexHeatmap)
+library(circlize)
+library(grid)
+
+tt        <- table(query$final, query$customclassif)
+tt        <- round(tt * 100 / rowSums(tt), 2)
+tt_matrix <- as.matrix(tt)
+
+col_fun <- colorRamp2(
+  c(0, 20, 40, 60, 80, 100),
+  c("#FEFAE0", "#FDDCAA", "#FDAE61", "#F46D43", "#D73027", "#67001F")
+)
+
+lgd <- Legend(
+  col_fun        = col_fun,
+  title          = "Proportion (%)",
+  title_gp       = gpar(fontsize = 20, fontface = "bold"),
+  labels_gp      = gpar(fontsize = 20),
+  legend_height  = unit(6, "cm"),
+  grid_width     = unit(0.8, "cm"),
+  title_position = "topcenter",
+  labels_rot     = 0,
+  direction      = "vertical"
+)
+
+ht <- Heatmap(
+  tt_matrix,
+  name                        = "Proportion of cells (%)",
+  col                         = col_fun,
+  cluster_rows                = TRUE,
+  cluster_columns             = TRUE,
+  clustering_distance_rows    = "euclidean",
+  clustering_distance_columns = "euclidean",
+  clustering_method_rows      = "ward.D2",
+  clustering_method_columns   = "ward.D2",
+  show_row_dend               = TRUE,
+  show_column_dend            = TRUE,
+  row_dend_side               = "right",
+  column_dend_side            = "top",
+  row_dend_width              = unit(3, "cm"),
+  column_dend_height          = unit(3, "cm"),
+  row_names_max_width         = unit(6, "cm"),
+  column_names_max_height     = unit(4, "cm"),
+  row_names_side              = "left",   
+  row_names_gp                = gpar(fontsize = 15, col = "black"),
+  column_names_gp             = gpar(fontsize = 15, col = "black"),
+  column_names_rot            = 45,
+  row_title                   = "Cell Type (TwoPass Annotation)",
+  column_title                = "Cell Type (scType Annotation)",
+  row_title_gp                = gpar(fontsize = 20, fontface = "bold", col = "black"),
+  column_title_gp             = gpar(fontsize = 20, fontface = "bold", col = "black"),
+  row_title_side              = "left",
+  column_title_side           = "bottom",
+  rect_gp                     = gpar(col = "white", lwd = 1),
+  show_heatmap_legend         = FALSE
+)
+
+pdf(file   = paste0(resultsDir, "Heatmap_final_vs_scType_thesis.pdf"),
+    width  = 15,
+    height = 13)
+
+# Draw heatmap only, with right padding to reserve space for legend
+draw(ht,
+     padding = unit(c(10, 10, 10, 60), "mm"))   # ← reserves space on right
+
+# Manually place legend in the reserved space
+pushViewport(viewport(x      = unit(0.88, "npc"),
+                      y      = unit(0.5,  "npc"),
+                      width  = unit(4, "cm"),
+                      height = unit(8, "cm"),
+                      just   = c("left", "center")))
+draw(lgd)
+popViewport()
+
+dev.off()
