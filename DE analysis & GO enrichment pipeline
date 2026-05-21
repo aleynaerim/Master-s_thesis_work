@@ -1,0 +1,561 @@
+  library(Seurat)
+  library(DESeq2)
+  library(dplyr)
+  library(tidyr)
+  library(tibble)
+  library(ggplot2)
+  library(ggrepel)
+  library(cowplot)
+  library(patchwork)
+  library(pheatmap)
+  library(RColorBrewer)
+  library(clusterProfiler)
+  library(enrichplot)
+  library(org.Hs.eg.db)
+
+  seurat_obj <- readRDS("/x.RDS")
+  resultsDir <- "/x/"
+
+
+  #Exclude donors with < 50 cells for a given cell type
+
+  cell_counts <- seurat_obj@meta.data %>%
+  group_by(final, donor, patientDisease) %>%
+  summarise(n_cells = n(), .groups = "drop")
+
+  cat("Combinations with < 50 cells (will be excluded):\n")
+  print(filter(cell_counts, n_cells < 50))
+
+
+  #Helper function definitions
+  #Pseudobulk
+
+  make_pseudobulk <- function(seurat_obj, group_vars) {
+  
+  counts   <- GetAssayData(seurat_obj, layer = "counts")
+  meta     <- seurat_obj@meta.data
+  
+  meta$group_id <- apply(meta[, group_vars, drop = FALSE], 1,
+                         paste, collapse = "_")
+  groups <- unique(meta$group_id)
+  
+  pb_matrix <- sapply(groups, function(g) {
+    cells <- rownames(meta)[meta$group_id == g]
+    rowSums(counts[, cells, drop = FALSE])
+  })
+  
+  pb_meta <- meta[match(groups, meta$group_id), group_vars, drop = FALSE]
+  rownames(pb_meta) <- groups
+  pb_meta <- pb_meta[colnames(pb_matrix), , drop = FALSE]
+  
+  list(counts = pb_matrix, meta = pb_meta)
+}
+
+
+#GO enrichment
+#Universe = all genes tested by DESeq2
+
+run_GO <- function(genes, universe, label, ct, resultsDir,
+                   lfc_direction = "up") {
+  
+  if (length(genes) < 10) {
+    cat("  Skipping GO for", label, "— fewer than 5 genes\n")
+    return(NULL)
+  }
+  
+  lfc_label <- if (lfc_direction == "up") "LFC > 1" else "LFC < -1"
+  subtitle  <- paste0(ct, " | ", label, " | ", lfc_label)
+  
+  bp <- enrichGO(gene          = genes,
+                 universe      = universe,
+                 keyType       = "SYMBOL",
+                 OrgDb         = org.Hs.eg.db,
+                 ont           = "BP",
+                 pAdjustMethod = "BH",
+                 qvalueCutoff  = 0.01,
+                 readable      = TRUE)
+  
+  cc <- enrichGO(gene          = genes,
+                 universe      = universe,
+                 keyType       = "SYMBOL",
+                 OrgDb         = org.Hs.eg.db,
+                 ont           = "CC",
+                 pAdjustMethod = "BH",
+                 qvalueCutoff  = 0.01,
+                 readable      = TRUE)
+  
+  mf <- enrichGO(gene          = genes,
+                 universe      = universe,
+                 keyType       = "SYMBOL",
+                 OrgDb         = org.Hs.eg.db,
+                 ont           = "MF",
+                 pAdjustMethod = "BH",
+                 qvalueCutoff  = 0.01,
+                 readable      = TRUE)
+  
+  #Only include ontologies that returned significant terms
+  plots <- list()
+  if (!is.null(bp) && nrow(bp) > 0)
+    plots$bp <- dotplot(bp, showCategory = 15) +
+    ggtitle("Biological Process", subtitle = subtitle) +
+    scale_y_discrete(labels = function(x) stringr::str_trunc(x, 40)) +
+    theme(axis.text.y = element_text(size = 25))
+  if (!is.null(cc) && nrow(cc) > 0)
+    plots$cc <- dotplot(cc, showCategory = 15) +
+    ggtitle("Cellular Component", subtitle = subtitle) +
+    scale_y_discrete(labels = function(x) stringr::str_trunc(x, 40))
+  if (!is.null(mf) && nrow(mf) > 0)
+    plots$mf <- dotplot(mf, showCategory = 15) +
+    ggtitle("Molecular Function", subtitle = subtitle) +
+    scale_y_discrete(labels = function(x) stringr::str_trunc(x, 40))
+  
+  if (length(plots) == 0) {
+    cat("  No significant GO terms for", label, "\n")
+    return(NULL)
+  }
+  
+  # Scale height to number of terms so rows never overlap
+  n_terms <- min(15, max(sapply(list(bp, cc, mf), function(x)
+    if (!is.null(x) && nrow(x) > 0) nrow(x) else 0)))
+  
+  pdf(file.path(resultsDir,
+                paste0("GO_", gsub("/", "-", ct), "_", label, ".pdf")),
+      width  = 12 * length(plots),
+      height = max(6, n_terms * 0.6 + 2))
+  print(plot_grid(plotlist = plots, ncol = length(plots)))
+  dev.off()
+  
+  cat("  GO saved for", ct, "-", label, "\n")
+  return(list(BP = bp, CC = cc, MF = mf))
+}
+
+  #Main loop that works on each pseudobulked cell type
+
+  cell_types <- unique(seurat_obj$final)
+  de_results <- list()
+  
+  for (ct in cell_types) {
+  
+  cat("\n========== Cell type:", ct, "==========\n")
+  
+  #Cell count filter
+  ct_counts    <- filter(cell_counts, final == ct)
+  valid_donors <- ct_counts %>% filter(n_cells >= 50) %>% pull(donor)
+  excluded     <- ct_counts %>% filter(n_cells < 50)
+  
+  if (nrow(excluded) > 0) {
+    cat("  Excluding donors with < 50 cells:\n")
+    print(excluded)
+  }
+  
+  valid_meta <- ct_counts %>% filter(donor %in% valid_donors)
+  group_n    <- table(valid_meta$patientDisease)
+  
+  cat("  Valid donors per group:\n")
+  print(group_n)
+  
+  if (length(group_n) < 2 || any(group_n < 2)) {
+    cat("  Skipping — not enough donors per group\n")
+    next
+  }
+  
+  #Pseudobulk
+  seurat_ct <- subset(seurat_obj,
+                      subset = final == ct & donor %in% valid_donors)
+  
+  pb_ct      <- make_pseudobulk(seurat_ct, group_vars = c("donor", "final", "patientDisease"))
+  rm(seurat_ct); gc()
+  
+  counts_ct              <- pb_ct$counts
+  meta_ct                <- pb_ct$meta
+  
+  # Sanitize factor levels: replace spaces with underscores so DESeq2's
+  # model.matrix does not choke on "Intellectual disability"
+  meta_ct$patientDisease <- droplevels(
+    factor(gsub(" ", "_", meta_ct$patientDisease))
+  )
+  
+  
+  dds_pca <- DESeqDataSetFromMatrix(countData = counts_ct,
+                                    colData   = meta_ct,
+                                    design    = ~ patientDisease)
+  dds_pca$patientDisease <- relevel(dds_pca$patientDisease, ref = "Normal")
+  dds_pca <- dds_pca[rowSums(counts(dds_pca) >= 5) >= 2, ]
+  vst_data <- vst(dds_pca, blind = TRUE)
+  
+  #DESeq2
+  dds <- DESeqDataSetFromMatrix(countData = counts_ct,
+                                colData   = meta_ct,
+                                design    = ~ patientDisease)
+  dds$patientDisease <- relevel(dds$patientDisease, ref = "Normal")
+  dds <- dds[rowSums(counts(dds) >= 5) >= 2, ]
+  dds <- DESeq(dds)
+  
+  res <- results(dds,
+                 contrast = c("patientDisease", "Intellectual_disability", "Normal"),
+                 alpha    = 0.05) %>%
+    as.data.frame() %>%
+    filter(!is.na(padj)) %>%
+    arrange(padj)
+  
+  n_sig <- sum(res$padj < 0.05 & abs(res$log2FoldChange) > 1)
+  cat("  Significant DE genes (padj < 0.05, |LFC| > 1):", n_sig, "\n")
+  
+  write.csv(res,
+            file.path(resultsDir,
+                      paste0("DE_", gsub("/", "-", ct), "_Patient_vs_Normal.csv")))
+  
+  #Volcano plot
+  res_plot      <- res
+  res_plot$gene <- rownames(res_plot)
+  res_plot$sig  <- case_when(
+    res_plot$padj < 0.05 & res_plot$log2FoldChange >  1 ~ "Up in Patient",
+    res_plot$padj < 0.05 & res_plot$log2FoldChange < -1 ~ "Down in Patient",
+    TRUE ~ "NS"
+  )
+  
+  top_genes <- res_plot %>%
+    filter(sig != "NS") %>%
+    arrange(padj) %>%
+    head(15)
+  
+  p_volc <- ggplot(res_plot, aes(log2FoldChange, -log10(padj), colour = sig)) +
+    geom_point(alpha = 0.5, size = 1.2) +
+    geom_text_repel(data = top_genes, aes(label = gene),
+                    size = 2.8, max.overlaps = 20, segment.size = 0.3) +
+    scale_colour_manual(values = c("Up in Patient"   = "firebrick",
+                                   "Down in Patient" = "steelblue",
+                                   "NS"              = "grey70")) +
+    geom_vline(xintercept = c(-1, 1), linetype = "dashed",
+               colour = "grey40", linewidth = 0.4) +
+    geom_hline(yintercept = -log10(0.05), linetype = "dashed",
+               colour = "grey40", linewidth = 0.4) +
+    labs(title    = paste0(ct, ": Patient vs Normal"),
+         subtitle = "Red = up in patient | Blue = down in patient | |LFC| > 1",
+         x        = expression(log[2]~"Fold Change (Patient / Normal)"),
+         y        = expression(-log[10]~"(adjusted p-value)"),
+         colour   = "") +
+    theme_classic(base_size = 11) +
+    theme(legend.position = "bottom", plot.title = element_text(hjust = 0.5))
+  
+  ggsave(file.path(resultsDir, paste0("Volcano_", gsub("/", "-", ct), ".pdf")),
+         plot = p_volc, width = 7, height = 6)
+  cat("  Volcano saved\n")
+  
+  #Heatmap of top DE genes
+  # Log-normalised average expression per donor, Z-scored per gene.
+  
+  sig_genes <- res %>%
+    filter(padj < 0.05, abs(log2FoldChange) > 1) %>%
+    arrange(padj) %>%
+    head(20) %>%
+    rownames()
+  
+  if (length(sig_genes) >= 2) {
+    
+    seurat_ct_hm <- subset(seurat_obj,
+                           subset = final == ct & donor %in% valid_donors)
+    
+    avg_expr <- AverageExpression(seurat_ct_hm,
+                                  features = sig_genes,
+                                  group.by = "donor",
+                                  assays   = "RNA",
+                                  layer    = "data")$RNA
+    rm(seurat_ct_hm); gc()
+    
+    donor_anno <- data.frame(
+      Condition = case_when(
+        grepl("312.3", colnames(avg_expr)) ~ "Patient_312.3",
+        grepl("315.7", colnames(avg_expr)) ~ "Patient_315.7",
+        TRUE                               ~ "Normal"
+      ),
+      row.names = colnames(avg_expr)
+    )
+    
+    col_order <- c(rownames(donor_anno)[donor_anno$Condition == "Normal"],
+                   rownames(donor_anno)[donor_anno$Condition == "Patient_312.3"],
+                   rownames(donor_anno)[donor_anno$Condition == "Patient_315.7"])
+    col_order  <- col_order[col_order %in% colnames(avg_expr)]
+    avg_expr   <- avg_expr[, col_order, drop = FALSE]
+    donor_anno <- donor_anno[col_order, , drop = FALSE]
+    
+    row_sd   <- apply(avg_expr, 1, sd)
+    avg_expr <- avg_expr[row_sd > 0, ]
+    scaled   <- pmin(pmax(t(scale(t(avg_expr))), -2), 2)
+    
+    ann_colours <- list(Condition = c(Normal        = "steelblue",
+                                      Patient_312.3 = "tomato",
+                                      Patient_315.7 = "darkorange"))
+    
+    outfile <- file.path(resultsDir, paste0("Heatmap_", gsub("/", "-", ct), ".pdf"))
+    pdf(outfile,
+        width  = max(6, ncol(scaled) * 0.8 + 3),
+        height = max(8, nrow(scaled) * 0.20 + 3))
+    pheatmap(scaled,
+             annotation_col    = donor_anno,
+             annotation_colors = ann_colours,
+             cluster_cols      = FALSE,
+             cluster_rows      = TRUE,
+             color             = rev(colorRampPalette(brewer.pal(11, "RdYlBu"))(100)),
+             main              = paste0(ct, ": Top DE Genes\nZ-scored log-normalised expression"),
+             fontsize_row      = max(12, min(20, 200 / nrow(scaled))),
+             fontsize_col      = 10,
+             show_rownames     = TRUE,
+             show_colnames     = TRUE,
+             border_color      = NA)
+    dev.off()
+    cat("  Heatmap saved:", outfile, "\n")
+    
+  } else {
+    cat("  Not enough significant genes for heatmap\n")
+  }
+  
+  #GO enrichment
+  universe_genes <- rownames(res)
+  
+  genes_up   <- rownames(filter(res, padj < 0.05, log2FoldChange >  1))
+  genes_down <- rownames(filter(res, padj < 0.05, log2FoldChange < -1))
+  
+  cat("  GO — genes up:", length(genes_up),
+      "| genes down:", length(genes_down), "\n")
+  
+  run_GO(genes_up,   universe_genes, "Upregulated",   ct, resultsDir, lfc_direction = "up")
+  run_GO(genes_down, universe_genes, "Downregulated", ct, resultsDir, lfc_direction = "down")
+
+  #Summary table
+  
+  summary_df <- data.frame(
+    cell_type = names(de_results),
+    n_tested  = sapply(de_results, function(x) nrow(x$res)),
+    n_sig     = sapply(de_results, function(x) sum(x$res$padj < 0.05 & abs(x$res$log2FoldChange) > 1)),
+    n_up      = sapply(de_results, function(x) sum(x$res$padj < 0.05 & x$res$log2FoldChange >  1)),
+    n_down    = sapply(de_results, function(x) sum(x$res$padj < 0.05 & x$res$log2FoldChange < -1))
+  ) %>% arrange(desc(n_sig))
+  
+  cat("\n=== DE summary across cell types ===\n")
+  print(summary_df)
+  
+  write.csv(summary_df,
+            file.path(resultsDir, "DE_summary_all_celltypes.csv"),
+            row.names = FALSE)
+
+  #Mirror barplot of DEGs
+  #Assign negative values to downregulated so bars mirror around x = 0
+
+bar_df <- summary_df %>%
+  # Order factor levels: most total DEGs at top of y-axis
+  mutate(cell_type = factor(cell_type,
+                            levels = cell_type[order(n_up + n_down)])) %>%
+  dplyr::select(cell_type, n_up, n_down) %>%
+  pivot_longer(cols      = c(n_up, n_down),
+               names_to  = "direction",
+               values_to = "count") %>%
+  mutate(
+    #Downregulated counts become negative → bars go left
+    count_signed = ifelse(direction == "n_down", -count, count),
+    direction    = recode(direction,
+                          n_up   = "Up in patient",
+                          n_down = "Down in patient"))
+
+  #Determine x-axis limits (symmetric around 0)
+  x_max <- max(abs(bar_df$count_signed), na.rm = TRUE) * 1.15
+  
+  #Plot
+  p_mirror_bar <- ggplot(bar_df,
+                         aes(x    = count_signed,
+                             y    = cell_type,
+                             fill = direction)) +
+    
+  geom_col(width = 0.65, colour = "white", linewidth = 0.25) +
+  
+  #Add count labels inside/outside bars
+  geom_text(aes(label = abs(count_signed),
+                hjust = ifelse(count_signed >= 0, -0.25, 1.25)),
+            size = 3, colour = "grey30") +
+  
+  #Vertical line at x = 0 (the mirror axis)
+  geom_vline(xintercept = 0, linewidth = 0.5, colour = "grey40") +
+  
+  scale_fill_manual(
+    values = c("Up in patient"   = "#C0392B",   # red
+               "Down in patient" = "#2980B9"),   # blue
+    name   = NULL
+  ) +
+  
+  scale_x_continuous(
+    limits = c(-x_max, x_max),
+    breaks = pretty(c(-x_max, x_max), n = 6),
+    labels = function(x) abs(x),   # show absolute values on both sides
+    expand = expansion(mult = c(0.02, 0.02))
+  ) +
+  
+  labs(
+    title    = "Differentially expressed genes per cell type",
+    subtitle = "padj < 0.05  |log2FC| > 1  |  Patient vs Normal",
+    x        = "Number of DEGs",
+    y        = NULL
+  ) +
+  
+  theme_classic(base_size = 12) +
+  theme(
+    plot.title         = element_text(face = "bold", size = 14),
+    plot.subtitle      = element_text(size = 10, colour = "grey50"),
+    legend.position    = "bottom",
+    legend.direction   = "horizontal",
+    legend.key.size    = unit(0.45, "cm"),
+    axis.text.y        = element_text(size = 11),
+    axis.text.x        = element_text(size = 10),
+    axis.ticks.y       = element_blank(),
+    axis.line.y        = element_blank(),
+    panel.grid.major.x = element_line(colour = "grey90", linewidth = 0.3)
+  )
+
+  ggsave(
+    file.path(resultsDir, "Plot_DEG_mirror_barplot.pdf"),
+    plot   = p_mirror_bar,
+    width  = 9,
+    height = max(4, nrow(summary_df) * 0.5 + 2)
+  )
+  cat("\nPlot 1 saved: Plot_DEG_mirror_barplot.pdf\n")
+
+  sig_per_ct <- lapply(de_results, function(x)
+    rownames(filter(x$res, padj < 0.05, abs(log2FoldChange) > 1)))
+  
+  gene_freq <- sort(table(unlist(sig_per_ct)), decreasing = TRUE)
+  
+  cat("\nGenes DE in more than one cell type:\n")
+  print(gene_freq[gene_freq > 1])
+  
+  write.csv(data.frame(gene           = names(gene_freq),
+                       n_celltypes_DE = as.integer(gene_freq)),
+            file.path(resultsDir, "genes_DE_across_celltypes.csv"),
+            row.names = FALSE)
+
+  #Upset plot to investigate the DEGs shared between the cell types
+
+  focus_cts <- c("vRG", "panRG-O", "Per", "PgG2M")
+  missing_cts <- setdiff(focus_cts, names(de_results))
+  
+  if (length(missing_cts) > 0)
+    warning("These cell types were not found in de_results: ",
+            paste(missing_cts, collapse = ", "))
+  
+  focus_cts <- intersect(focus_cts, names(de_results))
+  deg_sets <- lapply(focus_cts, function(ct) {
+    rownames(filter(de_results[[ct]]$res,
+                    padj < 0.05,
+                    abs(log2FoldChange) > 1))
+  })
+  names(deg_sets) <- focus_cts
+  
+  # Report set sizes
+  cat("=== DEG set sizes ===\n")
+  for (ct in focus_cts)
+    cat(ct, ":", length(deg_sets[[ct]]), "DEGs\n")
+  
+
+  #Build data frame for ggupset
+  # One row per gene; the "cell_types" column holds a list of which cell types
+  # that gene is DE in.
+  
+  all_degs <- unique(unlist(deg_sets))
+  cat("\nTotal unique DEGs across all four cell types:", length(all_degs), "\n")
+  
+  upset_df <- tibble(gene = all_degs) %>%
+    mutate(
+      cell_types = lapply(gene, function(g) {
+        sort(focus_cts[sapply(deg_sets, function(s) g %in% s)])
+      }))
+
+
+#Plot
+
+p_upset <- ggplot(upset_df, aes(x = cell_types)) +
+  
+  geom_bar(fill = "#2C5F8A", width = 0.6) +
+  
+  geom_text(stat  = "count",
+            aes(label = after_stat(count)),
+            vjust = -0.4,
+            size  = 3.2,
+            colour = "grey30") +
+  
+  scale_x_upset(
+    n_intersections = 20,    
+    order_by        = "freq" 
+  ) +
+  
+  scale_y_continuous(expand = expansion(mult = c(0, 0.12))) +
+  
+  labs(
+    title    = "Overlap of DEGs across cell types",
+    subtitle = "padj < 0.05  |log2FC| > 1  |  Patient vs Normal",
+    x        = NULL,
+    y        = "Number of DEGs"
+  ) +
+  
+  theme_classic(base_size = 11) +
+  theme_combmatrix(
+    combmatrix.label.text         = element_text(size = 10),
+    combmatrix.label.extra_spacing = 6
+  ) +
+  theme(
+    plot.title    = element_text(face = "bold", size = 13),
+    plot.subtitle = element_text(size = 9, colour = "grey50"),
+    axis.text.y   = element_text(size = 10),
+    axis.title.y  = element_text(size = 10),
+    axis.line.x   = element_blank(),
+    axis.ticks.x  = element_blank()
+  )
+
+ggsave(
+  file.path(resultsDir, "Plot_UpSet_DEG_overlap.pdf"),
+  plot   = p_upset,
+  width  = 10,
+  height = 6
+)
+cat("\nPlot 3 saved: Plot_UpSet_DEG_overlap.pdf\n")
+
+  
+  #Combined PCA of pseudobulk samples
+  
+  pb_all  <- make_pseudobulk(seurat_obj,
+                             group_vars = c("donor", "final", "patientDisease"))
+  pb_all$meta$patientDisease <- gsub(" ", "_", pb_all$meta$patientDisease)
+  
+  dds_all <- DESeqDataSetFromMatrix(countData = pb_all$counts,
+                                    colData   = pb_all$meta,
+                                    design    = ~ patientDisease)
+  dds_all <- dds_all[rowSums(counts(dds_all) >= 5) >= 2, ]
+  vst_all <- vst(dds_all, blind = TRUE)
+  
+  #Check PC1, PC2, and PC3
+  pca_all  <- prcomp(t(assay(vst_all)), center = TRUE, scale. = FALSE)
+  pv_all   <- round(100 * pca_all$sdev^2 / sum(pca_all$sdev^2))
+  
+  pca_df <- as.data.frame(pca_all$x) %>%
+    rownames_to_column("sample") %>%
+    mutate(cell_type      = pb_all$meta$final,
+           patientDisease = pb_all$meta$patientDisease,
+           donor          = pb_all$meta$donor)
+  
+
+  plot_pca <- function(df, x, y, pv) {
+    ggplot(df, aes(.data[[x]], .data[[y]],
+                   colour = cell_type,
+                   shape  = patientDisease,
+                   label  = donor)) +
+      geom_point(size = 3, alpha = 0.85) +
+      geom_text_repel(size = 2.5, max.overlaps = 20,
+                      segment.size = 0.3, show.legend = FALSE) +
+      scale_shape_manual(values = c("Normal" = 16, "Intellectual_disability" = 17)) +
+      labs(x      = paste0(x, " (", pv[as.integer(gsub("PC", "", x))], "% variance)"),
+           y      = paste0(y, " (", pv[as.integer(gsub("PC", "", y))], "% variance)"),
+           colour = "Cell type", shape = "Condition") +
+      theme_classic(base_size = 12) +
+      theme(legend.position = "right")
+  }
+  
+  ggsave(file.path(resultsDir, "PCA_all_pseudobulk_PC1_PC2.pdf"),
+         plot = plot_pca(pca_df, "PC1", "PC2", pv_all), width = 10, height = 7)
+  
