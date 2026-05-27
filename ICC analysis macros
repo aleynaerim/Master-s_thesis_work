@@ -1,0 +1,479 @@
+#ASH1L-OCT4 (Fiji macro)
+// Iterate through all wells in a 96-well plate = For CPvsNP_v1
+nRows = 6; // Rows per well
+nCols = 3; // Columns per well
+nFields = 25; // Fields per well
+nChannels = 3; // Channels per plane
+// Base path for images
+basePath = "/x/";
+
+// === Collect results in memory ===
+results_ash1L = newArray(); // Will store: sortableKey \t csvLine
+results_oct4 = newArray(); // Will store: sortableKey \t csvLine
+
+setBatchMode(true);
+// Format row and column numbers to two digits
+for(row=2; row<=nRows; row++){
+rowID = IJ.pad(row, 2);
+
+	for(col=1; col<=nCols; col++){
+	colID = IJ.pad(col, 2);
+
+// Loop over each field and channel in the specific well
+	for (field = 1; field <= nFields; field++) {
+		roiManager("reset");        // FIX 1a: clear ROIs from previous field
+		run("Clear Results");       // FIX 1b: clear Results table from previous field
+    	fieldID = IJ.pad(field, 2);
+		imagekey= "r" + rowID + "c" + colID + "f" + fieldID;
+		
+		for (channel = 1; channel <= nChannels; channel++) {
+    		fileName = imagekey + "-ch" + channel + "t1.tiff";
+            	filePath = basePath + fileName;
+            	print(filePath);
+            	
+            	if (File.exists(filePath)){
+            	open(filePath);
+            	rename("Image-"+channel+".tiff");
+            	print("Opened"+filePath);
+            	}
+            	
+		}
+		
+	            		if (!isOpen("Image-1.tiff")){
+        				print("Skipping" + imagekey + "unavailable");
+        				continue;  // skip to the next iteration safely
+    					}
+    					
+	            		selectImage("Image-1.tiff");
+						run("Auto Threshold", "method=Mean white");
+						setOption("BlackBackground", true);
+						run("Convert to Mask");
+						run("Open");
+						run("Erode");
+						run("Erode");
+						run("Erode");
+						run("Watershed");
+						run("Analyze Particles...", "size=20-300 show=Masks exclude summarize add");
+						selectImage("Image-1.tiff");
+						run("Flatten");
+						flattenID = getImageID();
+	            		
+		            	
+						//ASH1L
+						run("Clear Results");
+						selectImage("Image-3.tiff");
+						run("Auto Threshold", "method=Otsu white");
+						imageCalculator("AND create", flattenID,"Image-3.tiff");
+						ash1L_andID = getImageID();
+						selectImage(ash1L_andID);
+						run("Set Measurements...", "mean redirect=None decimal=3");
+						run("Select All");
+						total = roiManager("count");
+						roiManager("multi-measure measure_all");
+						//saveAs("Results", "/x.csv");
+						n = nResults;
+						// Initialize counter
+						ash1L_positive = 0;
+						
+						// Loop through each ROI result
+						for (i = 0; i < n; i++) {
+						    mean = getResult("Mean", i);
+						    if (mean > 14.44196526)
+						        ash1L_positive++;
+						}
+						
+						ash1L_pos_percent = (100 * ash1L_positive / total);
+						
+						// Print results
+						//print("Total DAPI+ cells: " + total);
+						//print("ash1L+ cells: " + ash1L_positive);
+						//print("Percent ash1L+: " + ash1L_pos_percent);
+						//print(nResults);
+						
+						selectImage(ash1L_andID);
+						close();
+						
+						// Create sortable key: rowNum_colNum_field_plane (zero-padded)
+    					sortKey_ash1L = rowID + colID + fieldID + "03";
+    					csvLine_ash1L = rowID + "," + colID + "," + fieldID + "," + channel + "," + total + "," + ash1L_positive + "," + ash1L_pos_percent;
+    					newIndex_ash1L = lengthOf(results_ash1L);
+						results_ash1L[newIndex_ash1L] = sortKey_ash1L + "\t" + csvLine_ash1L;
+	
+						print("Appended to results ash1L: " + results_ash1L[newIndex_ash1L]);
+						
+						//OCT4
+						run("Clear Results");
+                        selectImage("Image-2.tiff");
+                        run("Auto Threshold", "method=Triangle white");
+                        imageCalculator("AND create", flattenID,"Image-2.tiff");
+                        oct4_andID = getImageID();
+                        selectImage(oct4_andID);
+
+                        // new code
+                        run("Set Measurements...", "mean area redirect=None decimal=3");
+                        roiManager("multi-measure measure_all");
+                        run("Select All");
+                        total = roiManager("count");
+                        n = nResults;
+                        mean_vals = newArray(n);
+                        total_area = newArray(n);
+
+                        for (i = 0; i < n; i++) {
+                        mean_vals[i] = getResult("Mean", i);
+                        total_area[i] = getResult("Area", i);
+                        }
+
+                        setThreshold(10.77, (2^bitDepth())-1);
+
+                        run("Clear Results");
+                        run("Set Measurements...", "area limit redirect=None decimal=3");
+                        roiManager("multi-measure measure_all");
+
+                        // Initialize counter
+                        oct4_positive = 0;
+                       
+                        
+                       // Loop through each ROI result
+                       for (i = 0; i < n; i++) {
+                       thresh_area = getResult("Area", i);
+                       area_frac = thresh_area / total_area[i];
+
+                       mean = mean_vals[i];  // from earlier
+
+                       if (mean > 14.46842352 && area_frac > 0.05)
+                       oct4_positive++;
+                        }
+
+                       oct4_pos_percent = (100 * oct4_positive / total);
+						
+						// Print results
+						//print("Total DAPI+ cells: " + total);
+						//print("OCT4+ cells: " + oct4_positive);
+						//print("Percent OCT4+: " + oct4_pos_percent);
+						//print(nResults)
+						
+						// Create sortable key: rowNum_colNum_field_plane (zero-padded)
+    					sortKey_oct4 = rowID + colID + fieldID + "02";
+    					csvLine_oct4 = rowID + "," + colID + "," + fieldID + "," + channel + "," + total + "," + oct4_positive + "," + oct4_pos_percent;
+    					newIndex_oct4 = lengthOf(results_oct4);
+						results_oct4[newIndex_oct4] = sortKey_oct4 + "\t" + csvLine_oct4;
+	
+						print("Appended to results Oct4: " + results_oct4[newIndex_oct4]);	            	
+	            		
+	            		close("*");
+	            								
+					}
+            	}	
+			}
+
+// === Sort and write to file - ASH1K ===
+Array.sort(results_ash1L);
+
+// Step 1: Choose output file path
+outputPath =  basePath + "results_ash1L.csv";
+
+// Step 2: Build text content in a string variable
+csv = "Row,Column,Field,Channel,Total DAPI+ cells, ash1L+ cells, Percent ash1L+ cells\n";
+
+for (i = 0; i < lengthOf(results_ash1L); i++) {
+    parts = split(results_ash1L[i], "\t");
+    csv += parts[1] + "\n";
+}
+
+// Step 3: Write to file
+File.saveString(csv, outputPath);
+
+print("CSV written to: " + outputPath);
+
+// === Sort and write to file - Oct4 ===
+Array.sort(results_oct4);
+
+// Step 1: Choose output file path
+outputPath =  basePath + "results_oct4.csv";
+
+// Step 2: Build text content in a string variable
+csv = "Row,Column,Field,Channel,Total DAPI+ cells, Oct4+ cells, Percent Oct4+ cells\n";
+
+for (i = 0; i < lengthOf(results_oct4); i++) {
+    parts = split(results_oct4[i], "\t");
+    csv += parts[1] + "\n";
+}
+
+// Step 3: Write to file
+File.saveString(csv, outputPath);
+
+print("CSV written to: " + outputPath);
+
+setBatchMode(false);
+
+
+
+#SETD1A-SOX2
+
+// Iterate through all wells in a 96-well plate = For CPvsNP_v1
+nRows = 6; // Rows per well
+nCols = 6; // Columns per well
+nFields = 25; // Fields per well
+nChannels = 4; // Channels per plane
+// Base path for images
+basePath = "/x/";
+
+// === Collect results in memory ===
+results_setd1a = newArray(); // Will store: sortableKey \t csvLine
+results_sox2 = newArray(); // Will store: sortableKey \t csvLine
+
+setBatchMode(true);
+// Format row and column numbers to two digits
+for(row=2; row<=nRows; row++){
+rowID = IJ.pad(row, 2);
+
+	for(col=3; col<=nCols; col++){
+	colID = IJ.pad(col, 2);
+
+// Loop over each field and channel in the specific well
+	for (field = 1; field <= nFields; field++) {
+    roiManager("reset");
+    run("Clear Results");
+    	fieldID = IJ.pad(field, 2);
+		imagekey= "r" + rowID + "c" + colID + "f" + fieldID;
+		
+		for (channel = 1; channel <= nChannels; channel++) {
+    		fileName = imagekey + "-ch" + channel + "t1.tiff";
+            	filePath = basePath + fileName;
+            	print(filePath);
+            	
+            	if (File.exists(filePath)){
+            	open(filePath);
+            	rename("Image-"+channel+".tiff");
+            	print("Opened"+filePath);
+            	}
+            	
+		}
+		
+	            		if (!isOpen("Image-1.tiff")){
+        				print("Skipping" + imagekey + "unavailable");
+        				continue;  // skip to the next iteration safely
+    					}
+    					
+	            		selectImage("Image-1.tiff");
+						run("Auto Threshold", "method=Mean white");
+						setOption("BlackBackground", true);
+						run("Convert to Mask");
+						run("Open");
+						run("Erode");
+						run("Erode");
+						run("Erode");
+						run("Watershed");
+						run("Analyze Particles...", "size=20-300 show=Masks exclude summarize add");
+						selectImage("Image-1.tiff");
+						run("Flatten");
+						flattenID = getImageID();
+	            		
+		            	
+						//SETD1A
+						
+						run("Clear Results");
+					    selectImage("Image-3.tiff");
+						run("Auto Threshold", "method=Otsu white");
+						imageCalculator("AND create", flattenID,"Image-3.tiff");
+						setd1a_andID = getImageID();
+						selectImage(setd1a_andID);
+						run("Set Measurements...", "mean redirect=None decimal=3");
+						run("Select All");
+						total = roiManager("count");
+						roiManager("multi-measure measure_all");
+						//saveAs("Results", "/x.csv");
+						n = nResults;
+						// Initialize counter
+						setd1a_positive = 0;
+						
+						// Loop through each ROI result
+						for (i = 0; i < n; i++) {
+						    mean = getResult("Mean", i);
+						    if (mean > 14.44196526)
+						        setd1a_positive++;
+						}
+						
+						setd1a_pos_percent = (100 * setd1a_positive / total);
+						
+						// Print results
+						//print("Total DAPI+ cells: " + total);
+						//print("ash1L+ cells: " + ash1L_positive);
+						//print("Percent ash1L+: " + ash1L_pos_percent);
+						//print(nResults);
+						
+						selectImage(setd1a_andID);
+						close();
+						
+						// Create sortable key: rowNum_colNum_field_plane (zero-padded)
+    					sortKey_setd1a = rowID + colID + fieldID + "03";
+    					csvLine_setd1a = rowID + "," + colID + "," + fieldID + "," + channel + "," + total + "," + setd1a_positive + "," + setd1a_pos_percent;
+    					newIndex_setd1a = lengthOf(results_setd1a);
+						results_setd1a[newIndex_setd1a] = sortKey_setd1a + "\t" + csvLine_setd1a;
+	
+						print("Appended to results ash1L: " + results_setd1a[newIndex_setd1a]);
+						
+						//SOX2
+						run("Clear Results");
+						selectImage("Image-4.tiff");
+						run("Multiply...", "value=4");
+						run("Max...", "value=6000");
+						run("Auto Threshold", "method=Otsu white");
+						imageCalculator("AND create", flattenID,"Image-4.tiff");
+						sox2_andID = getImageID();
+						selectImage(sox2_andID);
+						run("Set Measurements...", "mean redirect=None decimal=3");
+						run("Select All");
+						total = roiManager("count");
+						roiManager("multi-measure measure_all");
+						//saveAs("Results", "/x.csv");
+						n = nResults;
+						// Initialize counter
+						sox2_positive = 0;
+						
+						// Loop through each ROI result
+						for (i = 0; i < n; i++) {
+						    mean = getResult("Mean", i);
+						    if (mean > 14.4162868)
+						        sox2_positive++;
+						}
+						
+						sox2_pos_percent = (100 * sox2_positive / total);
+						
+						// Print results
+						//print("Total DAPI+ cells: " + total);
+						//print("OCT4+ cells: " + oct4_positive);
+						//print("Percent OCT4+: " + oct4_pos_percent);
+						//print(nResults)
+						
+						// Create sortable key: rowNum_colNum_field_plane (zero-padded)
+    					sortKey_sox2 = rowID + colID + fieldID + "02";
+    					csvLine_sox2 = rowID + "," + colID + "," + fieldID + "," + channel + "," + total + "," + sox2_positive + "," + sox2_pos_percent;
+    					newIndex_sox2 = lengthOf(results_sox2);
+						results_sox2[newIndex_sox2] = sortKey_sox2 + "\t" + csvLine_sox2;
+	
+						print("Appended to results Sox2: " + results_sox2[newIndex_sox2]);	            	
+	            		
+	            		close("*");
+	            								
+					}
+            	}	
+			}
+
+// === Sort and write to file - SETD1A ===
+Array.sort(results_setd1a);
+
+// Step 1: Choose output file path
+outputPath =  basePath + "results_setd1a.csv";
+
+// Step 2: Build text content in a string variable
+csv = "Row,Column,Field,Channel,Total DAPI+ cells, setd1a+ cells, Percent setd1a+ cells\n";
+
+for (i = 0; i < lengthOf(results_setd1a); i++) {
+    parts = split(results_setd1a[i], "\t");
+    csv += parts[1] + "\n";
+}
+
+// Step 3: Write to file
+File.saveString(csv, outputPath);
+
+print("CSV written to: " + outputPath);
+
+// === Sort and write to file - Sox2 ===
+Array.sort(results_sox2);
+
+// Step 1: Choose output file path
+outputPath =  basePath + "results_sox2.csv";
+
+// Step 2: Build text content in a string variable
+csv = "Row,Column,Field,Channel,Total DAPI+ cells, Sox2+ cells, Percent Sox2+ cells\n";
+
+for (i = 0; i < lengthOf(results_sox2); i++) {
+    parts = split(results_sox2[i], "\t");
+    csv += parts[1] + "\n";
+}
+
+// Step 3: Write to file
+File.saveString(csv, outputPath);
+
+print("CSV written to: " + outputPath);
+
+setBatchMode(false);
+
+
+
+
+#Negative control images 
+// === CONFIGURATION ===
+
+setBatchMode(true); //
+//channelTag = "-ch12"; // Only process this channel
+inputDir = "/x/";
+//outputFile = File.open("/x.csv");
+
+// === Collect results in memory ===
+results = newArray(); // Will store: sortableKey \t csvLine
+
+// Map 1 to A-B
+rowLabels = newArray("B","C", "D", "E", "F");
+
+fileList = getFileList(inputDir);
+
+for (i = 0; i < fileList.length; i++) {
+    name = fileList[i];
+    print(name);
+
+    if (!endsWith(name, ".tif") && !endsWith(name, ".tiff")) continue;
+    //if (indexOf(name, channelTag) < 0) continue; if using only one channel
+
+rowStr = replace(name, ".*r(\\d+).*", "$1");
+field = replace(name, ".*f(\\d+).*", "$1");
+channel = replace(name, ".*ch(\\d+).*", "$1");
+
+colNum = 12;
+
+    // Convert to well ID (row letter + col number)
+    rowNum = parseInt(rowStr);           // 3
+    rowChar = rowLabels[rowNum - 2];     // C
+    print(rowChar);
+    wellID = rowChar + colNum;           // C03
+
+    // Open image
+    fullPath = inputDir + name;
+    open(fullPath);
+    run("8-bit");
+
+    // Get stats + histogram
+    getStatistics(area, mean, min, max, stdDev, histogram);
+
+    close(name);
+
+    // Create sortable key: rowNum_colNum_field_plane (zero-padded)
+    sortKey = d2s(rowNum,2) + colNum + field;
+    csvLine = wellID + "," + field + "," + channel + "," + min+ "," + max+ "," + mean;
+    newIndex = lengthOf(results);
+	results[newIndex] = sortKey + "\t" + csvLine;
+	
+	print("Appended to results: " + results[newIndex]);
+}
+
+// === Sort and write to file ===
+Array.sort(results);
+
+// Step 1: Choose output file path
+outputPath =  inputDir + "results.csv";
+
+// Step 2: Build text content in a string variable
+csv = "Well,Field,Channel,Min,Max,Mean\n";
+
+for (i = 0; i < results.length; i++) {
+    parts = split(results[i], "\t");
+    csv += parts[1] + "\n";
+}
+
+// Step 3: Write to file
+File.saveString(csv, outputPath);
+
+print("CSV written to: " + outputPath);
+
+setBatchMode(false); //
